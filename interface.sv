@@ -40,4 +40,50 @@ interface ram_if;
       output clk, output rst_n, output we, output re, output addr
    );
    
+   clocking wr_cb @(posedge clk);
+      default input #1 output #1;
+      output we;
+      output addr;
+      output wdata;
+      input valid;
+   endclocking
+   
+   clocking rd_cb @(posedge clk);
+      default input #1 output #1;
+      output re;
+      output addr;
+      input rdata;
+      input valid;
+   endclocking
+   
+   clocking mon_cb @(posedge clk);
+      default input #1;
+      input we;
+      input re;
+      input addr;
+      input wdata;
+      input rdata;
+      input valid;
+   endclocking
+   
+   modport WRITE_DRV(
+      clocking wr_cb, 
+      input clk
+   );
+   
+   modport READ_DRV(
+      clocking rd_cb, 
+      input clk
+   );
+   
+   modport WR_MON(
+      clocking mon_cb, 
+      input clk
+   );
+   
+   modport RD_MON(
+      clocking mon_cb, 
+      input clk
+   );
+   
 endinterface
