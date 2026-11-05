@@ -79,49 +79,131 @@ class generator;
       this.num_reads       = num_reads;
    endfunction
    
+   //send write task
+   local task send_write(
+      input logic [6:0] addr, 
+      input logic [7:0] data
+   );
+      transaction txn = new();
+      txn.op = WRITE;
+      txn.addr = addr;
+      txn.wdata = data;
+      txn.print("[GEN-WR]");
+      
+      wr_mbox.put(txn);
+   endtask
+   
+   //wait for write task
+   local task wait_writes_done(
+      input int unsigned n
+   );
+      bit tok;
+      repeat(n) wr_done_mbox.get(tok);
+   endtask
+   
+   //send read task
+   local task send_read(
+      input logic [6:0] addr
+   );
+      transaction txn = new();
+      txn.op = READ;
+      txn.addr = addr;
+      txn.print("[GEN-RD]");
+      
+      rd_mbox.put(txn);
+   endtask
+   
    //run task
-   task run(); 
-      transaction txn;
-      
-      logic [6:0] written_addr[];
-      written_addr = new[num_writes];
-      
+   task run(
+      input logic [6:0] wr_addrs[],
+      input logic [7:0] wr_datas[], 
+      input int unsigned n_writes, 
+      input logic [6:0] rd_addrs[], 
+      input int unsigned n_reads, 
+      input bit randomize_txns = 0 
+   ); 
       //Write
-      for(int i = 0; i < num_writes; i++) begin : Write_Logic
-         txn = new();
-         txn.op = WRITE;
-         if(!txn.randomize() with {txn.op == WRITE;}) begin
-            $display("Randomization failed : Write");
+      $display("[GEN] Sending %0d writes", n_writes);
+      if(randomize_txns) begin
+         for(int i = 0; i < n_writes; i++) begin
+            transaction txn = new();
+            if(!txn.randomize() with {op == WRITE;}) begin
+               $fatal(1, "[GEN] randomize() failed for WRITE %0d", i);
+            end
+            send_write(txn.addr, txn.wdata);
          end
+      end
+      else begin
+         for(int i = 0; i < n_writes; i++) begin
+            send_write(wr_addrs[i], wr_datas[i]);
+         end
+      end
+      
+      //Drain all writes before issuing reads
+      wait_writes_done(n_writes);
+      $display("[GEN] All writes done");
+      
+      //Reads
+      $display("[GEN] Sending %0d reads", n_reads);
+      if(randomize_txns) begin
+         for(int i = 0; i < n_reads; i++) begin
+            transaction txn = new();
+            if(!txn.randomize() with {op == READ;}) begin
+               $fatal(1, "[GEN] randomize() failed for READ %0d", i);
+            end
+            send_read(txn.addr);
+         end
+      end
+      else begin
+         for(int i = 0; i < n_reads; i++) begin
+            send_read(rd_addrs[i]);
+         end
+      end
+      
+      $display("[GEN] Done...");
+      
+      
+//      transaction txn;
+      
+//      logic [6:0] written_addr[];
+//      written_addr = new[num_writes];
+      
+//      //Write
+//      for(int i = 0; i < num_writes; i++) begin : Write_Logic
+//         txn = new();
+//         txn.op = WRITE;
+//         if(!txn.randomize() with {txn.op == WRITE;}) begin
+//            $display("Randomization failed : Write");
+//         end
          
-         written_addr[i] = txn.addr;
-         wr_mbox.put(txn);
-      end : Write_Logic
+//         written_addr[i] = txn.addr;
+//         wr_mbox.put(txn);
+//      end : Write_Logic
       
-      begin : Write_Ack
-         bit token;
-         for(int i = 0; i < num_writes; i++) begin
-            write_done_mbox.get(token);
-         end
-      end : Write_Ack
+//      begin : Write_Ack
+//         bit token;
+//         for(int i = 0; i < num_writes; i++) begin
+//            write_done_mbox.get(token);
+//         end
+//      end : Write_Ack
       
-      //Read : Write Address Array
-      for(int i = 0; i < num_writes; i++) begin : Read_arr
-         txn = new();
-         txn.op = READ;
-         txn.addr = written_addr[i];
-         rd_mbox.put(txn);
-      end : Read_arr
+//      //Read : Write Address Array
+//      for(int i = 0; i < num_writes; i++) begin : Read_arr
+//         txn = new();
+//         txn.op = READ;
+//         txn.addr = written_addr[i];
+//         rd_mbox.put(txn);
+//      end : Read_arr
       
-      //Read : Random Address
-      for(int i = 0; i < num_reads; i++) begin : Read_rand
-         txn = new();
-         txn.op = READ;
-         if(!txn.randomize() with {txn.op == READ;}) begin
-            $display("Randomization failed : Read");
-         end
-         rd_mbox.put(txn);
-      end : Read_rand
+//      //Read : Random Address
+//      for(int i = 0; i < num_reads; i++) begin : Read_rand
+//         txn = new();
+//         txn.op = READ;
+//         if(!txn.randomize() with {txn.op == READ;}) begin
+//            $display("Randomization failed : Read");
+//         end
+//         rd_mbox.put(txn);
+//      end : Read_rand
        
    endtask : run
    
@@ -294,10 +376,223 @@ class write_monitor;
       forever begin
          @(vif.mon_cb)
          
+         if(vif.mon_cb.we == 1'b1) begin
+            txn = new();
+            txn.op = WRITE;
+            
+            txn.addr = vif.mon_cb.addr;
+            txn.wdata = vif.mon_cb.wdata;
+            txn.valid = 1'b0;
+            
+            observed_count++;
+            
+            txn.print("Wr_Mon");
+            
+            sb_wr_mbox.put(txn);
+            rm_wr_mbox.put(txn);
+         end
+      end
+   endtask
+endclass
+
+
+// ----------- READ MONITOR -----------
+class read_monitor;
+   //virtual interface
+   virtual ram_if.RD_MON vif;
+   
+   //mailbox
+   mailbox #(transaction) sb_rd_mbox;
+   mailbox #(transaction) rm_rd_mbox;
+   
+   //intermediate variables
+   int unsigned observed_count;
+   
+   //new construct
+   function new(
+      virtual ram_if.RD_MON vif, 
+      mailbox #(transaction) sb_rd_mbox, 
+      mailbox #(transaction) rm_rd_mbox, 
+      int unsigned observed_count = 0
+   );
+      this.vif = vif;
+      this.sb_rd_mbox = sb_rd_mbox;
+      this.rm_rd_mbox = rm_rd_mbox;
+      this.observed_count = observed_count;
+   endfunction
+   
+   //run task
+   task run();
+      transaction txn;
+      $display("RD_MON started...");
+      forever begin
+         @(vif.clk)
+         #2;
+         txn.rdata = vif.rdata;
+         txn.valid = vif.valid;
+         txn.re = vif.re;
          
+         if(txn.valid == 0) begin
+            $display("valid isn't generated, waiting for valid");
+         end
+         
+         observed_count++;
+         
+         txn.print("rd_Mon");
+         
+         sb_rd_mbox.put(txn);
+         rm_rd_mbox.put(txn);
       end
    endtask
    
+endclass
+
+
+// ----------- REFERENCE MODEL -----------
+class ram_ref_model;
+   //memory
+   logic [7:0] mem[0:127];
+   
+   //mailboxe
+   mailbox #(transaction) rm_wr_mbox;
+   mailbox #(transaction) rm_rd_mbox;
+   mailbox #(transaction) sb_ex_mbox;
+   
+   //intermediate variables
+   int unsigned wr_processed;
+   int unsigned rd_processed;
+   
+   //new construct
+   function new(
+      mailbox #(transaction) rm_wr_mbox,
+      mailbox #(transaction) rm_rd_mbox,
+      mailbox #(transaction) sb_ex_mbox,
+      int unsigned wr_processed,
+      int unsigned rd_processed
+   );
+      this.rm_wr_mbox = rm_wr_mbox;
+      this.rm_rd_mbox = rm_rd_mbox;
+      this.sb_ex_mbox = sb_ex_mbox;
+      this.wr_processed = wr_processed;
+      this.rd_processed = rd_processed;
+   endfunction
+   
+   //run task for write
+   task run_writes();
+      transaction txn;
+      $display("RM : Write Task started...");
+      
+      forever begin
+         rm_wr_mbox.get(txn);
+         mem[txn.addr] = txn.wdata;
+         
+         wr_processed++;
+         
+         $display("RM | Wr addr: %0h, data: %0h, block: %0d", 
+            txn.addr, txn.wdata, txn.addr[6:5]);
+      end
+   endtask
+   
+   //run task for read
+   task run_reads();
+      transaction txn, exp_txn; //**********
+      $display("RM : Read Task started...");
+      
+      forever begin
+         rm_rd_mbox.get(txn);
+         txn.rdata = mem[txn.addr];
+         txn.valid = 1'b1;
+         
+         rd_processed++;
+      end
+   endtask
+   
+endclass
+
+
+// ----------- SCOREBOARD -----------
+class ram_scoreboard;
+   //mailbox
+   mailbox #(transaction) sb_rd_mbox;
+   mailbox #(transaction) sb_wr_mbox;
+   mailbox #(transaction) sb_exp_mbox;
+   
+   //intermediate variables
+   int unsigned pass_count;
+   int unsigned fail_count;
+   int unsigned wr_count;
+   
+   //new construct
+   function new(
+      mailbox #(transaction) sb_rd_mbox, 
+      mailbox #(transaction) sb_wr_mbox, 
+      mailbox #(transaction) sb_exp_mbox
+   );
+      this.sb_rd_mbox = sb_rd_mbox;
+      this.sb_wr_mbox = sb_wr_mbox;
+      this.sb_exp_mbox = sb_exp_mbox;
+   endfunction
+   
+   //run task for checker
+   task run_check();
+      transaction txn, exp_txn;
+      $display("Scoreboard started...");
+      
+      forever begin
+         sb_rd_mbox.get(actual);
+         sb_exp_mbox.get(expected);
+         
+         check(actual, expected);
+      end
+   endtask
+   
+   //checker function
+   function void check(
+      transaction actual,
+      transaction expected
+   );
+      bit addr_match;
+      bit data_match;
+      bit valid_match;
+      
+      addr_match = (actual.addr == expected.addr);
+      data_match = (actual.data == expected.data);
+      valid_match = (actual.valid == expected.valid);
+      
+      if(addr_match && data_match && valid_match) begin
+         pass_count++;
+         $display("SB passed | Addr: %0d, Data: %0d", 
+            actual.addr, actual.data);
+      end
+      else begin
+         fail_count++;
+         if(!addr_match) begin
+            $display("Addr Mismatch | A_Addr: %0d, E_Addr: %0d", 
+               actual.addr, expected.addr);
+         end
+         if(!data_match) begin
+            $display("Data Mismatch | A_Data: %0d, E_Data: %0d", 
+               actual.data, expected.data);
+         end
+      end
+      
+   endfunction
+   
+   //report function
+   function report();
+      //PENDING 
+      //no of write, no of transactions happened, no of read amd read txns happened
+      //total no of pass, fail, count
+      //if fail == 0, All test pass display
+      //if any fail, x test failed
+   endfunction
+   
+endclass
+
+
+//----------- ENVIRONMENT -----------
+class env;
+   `include "interface.sv";
    
    
 endclass
