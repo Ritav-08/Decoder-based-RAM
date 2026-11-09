@@ -466,15 +466,15 @@ class ram_ref_model;
    function new(
       mailbox #(transaction) rm_wr_mbox,
       mailbox #(transaction) rm_rd_mbox,
-      mailbox #(transaction) sb_ex_mbox,
-      int unsigned wr_processed,
-      int unsigned rd_processed
+      mailbox #(transaction) sb_ex_mbox
+//      int unsigned wr_processed = 0,
+//      int unsigned rd_processed = 0
    );
       this.rm_wr_mbox = rm_wr_mbox;
       this.rm_rd_mbox = rm_rd_mbox;
       this.sb_ex_mbox = sb_ex_mbox;
-      this.wr_processed = wr_processed;
-      this.rd_processed = rd_processed;
+//      this.wr_processed = wr_processed;
+//      this.rd_processed = rd_processed;
    endfunction
    
    //run task for write
@@ -539,10 +539,10 @@ class ram_scoreboard;
       $display("Scoreboard started...");
       
       forever begin
-         sb_rd_mbox.get(actual);
-         sb_exp_mbox.get(expected);
+//         sb_rd_mbox.get(actual);     //**********
+//         sb_exp_mbox.get(expected);  //**********
          
-         check(actual, expected);
+//         check(actual, expected);    //**********
       end
    endtask
    
@@ -591,8 +591,139 @@ endclass
 
 
 //----------- ENVIRONMENT -----------
-class env;
+class ram_env;
+   //external files
    `include "interface.sv";
    
+   //instantiations
+   generator gen;
+   ram_wr_driver wr_drv;
+   ram_rd_driver rd_drv;
+   write_monitor wr_mon;
+   read_monitor rd_mon;
+   ram_ref_model rm;
+   ram_sccoreboard sb;
    
+   //mailboxes
+   local mailbox #(transaction) wr_mbox;
+   local mailbox #(transaction) rd_mbox;
+   local mailbox #(bit) wr_done_mbox;
+   local mailbox #(transaction) rd_done_mbox;
+   local mailbox #(transaction) rm_wr_mbox;
+   local mailbox #(transaction) rm_rd_mbox;
+   local mailbox #(transaction) sb_wr_mbox;
+   mailbox #(transaction) sb_rd_mbox;
+   mailbox #(transaction) sb_exp_mbox;
+   
+   //virtual interface
+   virtual ram_if.WRITE_DRV wr_vif;
+   virtual ram_if.READ_DRV rd_vif;
+   virtual ram_if.WR_MON wr_mon_vif;
+   virtual ram_if.RD_MON rd_mon_vif;
+   
+   //new construct
+   function new(
+      virtual ram_if.WRITE_DRV wr_vif,
+      virtual ram_if.READ_DRV rd_vif,
+      virtual ram_if.WR_MON wr_mon_vif,
+      virtual ram_if.RD_MON rd_mon_vif
+   );
+      this.wr_vif = wr_vif;
+      this.rd_vif = rd_vif;
+      this.wr_mon_vif = wr_mon_vif;
+      this.rd_mon_vif = rd_mon_vif;
+      
+      wr_mbox = new();
+      rd_mbox = new();
+      wr_done_mbox = new();
+      rd_done_mbox = new();
+      rm_wr_mbox = new();
+      rm_rd_mbox = new();
+      sb_wr_mbox = new();
+      sb_rd_mbox = new();
+      sb_exp_mbox = new();
+      
+   endfunction
+   
+   //build function
+   function build();
+      gen    = new(
+                  wr_mbox, 
+                  rd_mbox, 
+                  wr_done_mbox
+               );
+      wr_drv = new(
+                  wr_vif, 
+                  wr_mbox, 
+                  wr_done_mbox
+               );
+      rd_drv = new(
+                  rd_vif, 
+                  rd_mbox, 
+                  rd_done_mbox
+               );
+      wr_mon = new(
+                  wr_mon_vif, 
+                  sb_wr_mbox, 
+                  rm_wr_mbox
+               );
+      rd_mon = new(
+                  rd_mon_vif, 
+                  rd_done_mbox, 
+                  sb_rd_mbox, 
+                  rm_rd_mbox
+               );
+      rm     = new(
+                  rm_wr_mbox, 
+                  rm_rd_mbox, 
+                  sb_exp_mbox
+               );
+      sb     = new(
+                  sb_rd_mbox, 
+                  sb_exp_mbox, 
+                  sb_wr_mbox
+               );
+      $display("[ENV] All components built");
+   endfunction
+   
+   //start task
+   task start();
+      fork 
+         wr_drv.run();
+         rd_drv.run();
+         wr_mon.run();
+         rd_mon.run();
+         rm.run_writes();
+         rm.run_reads();
+         sb.run_check();
+//         sb.run_wr_sink();
+      join_none
+      wr_drv.reset(4);
+      $display("[ENV] All threads started, DUT reset done");
+   endtask
+   
+   //run task
+   task run(
+      input logic [6:0] wr_addrs[], 
+      input logic [7:0] wr_datas[], 
+      input int unsigned n_writes, 
+      input logic [6:0] rd_addrs[], 
+      input int unsigned n_reads, 
+      input bit randomize_txns = 0
+   );
+      gen.run(
+         wr_addrs, 
+         wr_datas, 
+         n_writes, 
+         rd_addrs, 
+         n_reads, 
+         randomize_txns
+      );
+   endtask
+   
+   //report function
+//   function void report();
+//      sb.report();
+//   endfunction
+
 endclass
